@@ -2,6 +2,8 @@ TEMPLATE=lib
 
 CONFIG -= qt
 
+CONFIG += debug
+
 INCLUDEPATH += . /opt/local/include
 
 HEADERS += H5FD_sec2j.h

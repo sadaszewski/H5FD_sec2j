@@ -28,6 +28,7 @@
 
 static hid_t H5FD_SEC2j_g = 0;
 static hid_t H5FD_SEC2J_fapl = 0;
+static H5FD_t *H5FD_SEC2J_dummy = 0;
 
 static H5FD_t *H5FD_sec2j_open(const char *name, unsigned flags, hid_t fapl_id,
             haddr_t maxaddr);
@@ -93,16 +94,32 @@ typedef struct H5FD_sec2j_t {
 static int H5FD_sec2j_journal_init(H5FD_sec2j_t *f1);
 
 hid_t H5FD_sec2j_init() {
-    if ((H5FD_SEC2J_fapl = H5Pcreate(H5P_FILE_ACCESS)) < 0) {
-        return -1;
-    }
+    if (H5I_VFL != H5Iget_type(H5FD_SEC2j_g)) {
+        if ((H5FD_SEC2J_fapl = H5Pcreate(H5P_FILE_ACCESS)) < 0) {
+            return -1;
+        }
 
-    sec2j_debug("H5FD_SEC2J_fapl created\n");
+        /* if (H5Pset_fapl_sec2j(H5FD_SEC2J_fapl) < 0) {
+            return -1;
+        } */
+        if (H5Pset_fapl_sec2(H5FD_SEC2J_fapl) < 0) {
+            return -1;
+        }
 
-    if (H5I_VFL != H5Iget_type(H5FD_SEC2j_g))
+        sec2j_debug("H5FD_SEC2J_fapl created\n");
+
+        H5FD_SEC2J_dummy = H5FDopen("sec2j_dummy.h5", H5F_ACC_CREAT | H5F_ACC_RDWR, H5P_DEFAULT, MAXADDR);
+
+        sec2j_debug("H5FD_SEC2J_dummy created: 0x%lX\n", (u_int64_t) H5FD_SEC2J_dummy);
+
         H5FD_SEC2j_g = H5FDregister(&H5FD_sec2j_g);
 
-    sec2j_debug("SEC2J registered: %d\n", H5FD_SEC2j_g);
+        sec2j_debug("SEC2J registered: %d\n", H5FD_SEC2j_g);
+
+        /* if (H5Pset_fapl_sec2j(H5FD_SEC2J_fapl) < 0) {
+            return 0;
+        } */
+    }
 
     return H5FD_SEC2j_g;
 }
@@ -112,7 +129,8 @@ void H5FD_sec2j_term() {
 }
 
 herr_t H5Pset_fapl_sec2j(hid_t fapl_id) {
-    return H5Pset_driver(fapl_id, H5FD_SEC2, NULL);
+    sec2j_debug("H5Pset_fapl_sec2j()\n");
+    return H5Pset_driver(fapl_id, H5FD_SEC2J, NULL);
 }
 
 herr_t H5FD_sec2j_start_transaction(H5FD_t *_f1) {
@@ -228,6 +246,8 @@ static int H5FD_sec2j_revert_changes(int data_fd, int journal_fd) {
     hsize_t size;
     u_int32_t crc;
 
+    sec2j_debug("H5FD_sec2j_revert_changes(), data_fd: %d, journal_fd: %d\n", data_fd, journal_fd);
+
     if (lseek64(journal_fd, 0, 0) == -1) return -10; // set position to 0
 
     if (read(journal_fd, buf, 5) != 5) return -15; // read magic string
@@ -279,6 +299,9 @@ static H5FD_t *H5FD_sec2j_open(const char *name, unsigned flags, hid_t fapl_id, 
 {
     H5FD_sec2j_t *file = 0;
     char *buf = 0;
+    int ret;
+
+    sec2j_debug("H5FD_sec2j_open(), name: %s, maxaddr: 0x%lX, flags: 0x%lX\n", name, maxaddr, flags);
 
     if ((flags & H5F_ACC_RDWR) == 0) {
         sec2j_debug("Read-only access to journalled file is impossible. Journal cannot be played back.\n");
@@ -292,18 +315,27 @@ static H5FD_t *H5FD_sec2j_open(const char *name, unsigned flags, hid_t fapl_id, 
     if (H5Pset_fapl_sec2(fapl_id) < 0) goto fail;
     if ((file->data = H5FDopen(name, flags, fapl_id, maxaddr)) == 0) goto fail;
 
-    if (H5FDget_vfd_handle(file->data, H5P_DEFAULT, (void**) &file->data_fd) < 0) goto fail;
+    sec2j_debug("file->data: 0x%lX, file->data->driver_id: %d, H5FD_SEC2: %d\n", (u_int64_t) file->data, file->data->driver_id, H5FD_SEC2);
+
+    void *fd;
+    if (H5FDget_vfd_handle(file->data, H5P_DEFAULT, &fd) < 0) goto fail;
+
+    sec2j_debug("fd: %ld\n", *((int*) fd));
+
+    file->data_fd = *((int*) fd);
+
+    sec2j_debug("Made it here...\n");
 
     buf = (char*) malloc(strlen(name) + 16);
     if (buf == 0) goto fail;
     sprintf(buf, "%s.journal", name);
 
-    if ((file->journal_fd = open(name, O_RDONLY)) == -1) {
+    if ((file->journal_fd = open(buf, O_RDONLY)) == -1) {
         sec2j_debug("No journal that's good\n");
     } else {
         sec2j_debug("Journal found. Reverting changes...\n");
-        if (H5FD_sec2j_revert_changes(file->data_fd, file->journal_fd) < 0) {
-            sec2j_debug("Failed to revert changes\n");
+        if ((ret = H5FD_sec2j_revert_changes(file->data_fd, file->journal_fd)) < 0) {
+            sec2j_debug("Failed to revert changes: %d\n", ret);
             goto fail;
         }
         sec2j_debug("Done. Removing journal...\n");
@@ -311,9 +343,11 @@ static H5FD_t *H5FD_sec2j_open(const char *name, unsigned flags, hid_t fapl_id, 
         if (unlink(buf) == -1) goto fail;
     }
 
-    if ((file->journal_fd = open(name, O_WRONLY)) == -1) goto fail;
+    if ((file->journal_fd = open(buf, O_WRONLY | O_CREAT, 0600)) == -1) goto fail;
 
     H5FD_sec2j_journal_init(file);
+
+    sec2j_debug("H5FD_sec2j_open() succeeded.\n");
 
     return (H5FD_t*) file;
 
@@ -348,7 +382,10 @@ static int H5FD_sec2j_cmp(const H5FD_t *_f1, const H5FD_t *_f2) {
 
 static herr_t H5FD_sec2j_query(const H5FD_t *_f1, unsigned long *flags) {
     H5FD_sec2j_t *f1 = (H5FD_sec2j_t*) _f1;
-    return H5FDquery(f1->data, flags);
+    sec2j_debug("H5FD_sec2j_query(), _f1: 0x%lX\n", (u_int64_t) _f1);
+    herr_t ret = H5FD_SEC2J_dummy->cls->query(f1 ? f1->data : 0, flags);
+    sec2j_debug("Ok\n");
+    return ret;
 }
 
 static haddr_t H5FD_sec2j_get_eoa(const H5FD_t *_f1, H5FD_mem_t type) {
@@ -370,8 +407,10 @@ static herr_t H5FD_sec2j_get_handle(H5FD_t *_f1, hid_t fapl, void** file_handle)
     H5FD_sec2j_t *f1 = (H5FD_sec2j_t*) _f1;
 
     if (H5P_FILE_ACCESS_DEFAULT == fapl) {
+        sec2j_debug("Default get_handle\n");
         return H5FDget_vfd_handle(f1->data, fapl, file_handle);
     } else {
+        sec2j_debug("Internal get_handle\n");
         *file_handle = _f1;
         return 0;
     }
