@@ -94,11 +94,15 @@ static int H5FD_sec2j_journal_init(H5FD_sec2j_t *f1);
 
 hid_t H5FD_sec2j_init() {
     if ((H5FD_SEC2J_fapl = H5Pcreate(H5P_FILE_ACCESS)) < 0) {
-        return 0;
+        return -1;
     }
+
+    sec2j_debug("H5FD_SEC2J_fapl created\n");
 
     if (H5I_VFL != H5Iget_type(H5FD_SEC2j_g))
         H5FD_SEC2j_g = H5FDregister(&H5FD_sec2j_g);
+
+    sec2j_debug("SEC2J registered: %d\n", H5FD_SEC2j_g);
 
     return H5FD_SEC2j_g;
 }
