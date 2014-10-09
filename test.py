@@ -19,7 +19,11 @@ def main():
 	else:
 		fid = h5f.create(fname, fapl=fapl)
 	print 'fid ready:', fid.id
-	# f = h5py.File(fid)
+	f = h5py.File(fid)
+	sec2j.tx_start(fid.id)
+	g = f.require_group('bbic/volume/0')
+	g.attrs.create('width', 640)
+	# os._exit(-1)
 	#print f
 
 

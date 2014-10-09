@@ -138,6 +138,8 @@ herr_t H5FD_sec2j_start_transaction(H5FD_t *_f1) {
 
     if (f1->trans) return -10; // transaction already in progress
 
+    sec2j_debug("Starting transaction...\n");
+
     f1->trans = 1;
 
     return 0;
@@ -197,6 +199,8 @@ static int H5FD_sec2j_log_entry(H5FD_sec2j_t *f1, haddr_t addr, hsize_t size) {
     char buf[1024];
     hsize_t n, k;
     hssize_t old_pos;
+
+    sec2j_debug("H5FD_sec2j_log_entry()\n");
 
     if (f1->trans == 0) return -1; // not in transaction mode
 
@@ -364,13 +368,16 @@ fail:
 static herr_t H5FD_sec2j_close(H5FD_t *_file) {
     H5FD_sec2j_t *file;
 
+    sec2j_debug("H5FD_sec2j_close()\n");
+
     file = ((H5FD_sec2j_t*) _file);
 
     if (file->trans) {
+        sec2j_debug("Closing transaction\n");
         if (H5FD_sec2j_end_transaction(_file) < 0) return -10;
     }
 
-    return H5FDclose(((H5FD_sec2j_t*) file)->data);
+    return H5FDclose(file->data);
 }
 
 static int H5FD_sec2j_cmp(const H5FD_t *_f1, const H5FD_t *_f2) {
@@ -390,16 +397,19 @@ static herr_t H5FD_sec2j_query(const H5FD_t *_f1, unsigned long *flags) {
 
 static haddr_t H5FD_sec2j_get_eoa(const H5FD_t *_f1, H5FD_mem_t type) {
     H5FD_sec2j_t *f1 = (H5FD_sec2j_t*) _f1;
+    sec2j_debug("H5FD_sec2j_get_eoa()\n");
     return H5FDget_eoa(f1->data, type);
 }
 
 static herr_t H5FD_sec2j_set_eoa(H5FD_t *_f1, H5FD_mem_t type, haddr_t addr) {
     H5FD_sec2j_t *f1 = (H5FD_sec2j_t*) _f1;
+    sec2j_debug("H5FD_sec2j_set_eoa()\n");
     return H5FDset_eoa(f1->data, type, addr);
 }
 
 static haddr_t H5FD_sec2j_get_eof(const H5FD_t *_f1) {
     H5FD_sec2j_t *f1 = (H5FD_sec2j_t*) _f1;
+    sec2j_debug("H5FD_sec2j_get_eof()\n");
     return H5FDget_eof(f1->data);
 }
 
@@ -420,6 +430,7 @@ static herr_t H5FD_sec2j_read(H5FD_t *_f1, H5FD_mem_t type, hid_t fapl_id, haddr
                 size_t size, void *buf)
 {
     H5FD_sec2j_t *f1 = (H5FD_sec2j_t*) _f1;
+    sec2j_debug("H5FD_sec2j_read()\n");
     return H5FDread(f1->data, type, fapl_id, addr, size, buf);
 }
 
@@ -427,6 +438,8 @@ static herr_t H5FD_sec2j_write(H5FD_t *_f1, H5FD_mem_t type, hid_t fapl_id, hadd
                 size_t size, const void *buf)
 {
     H5FD_sec2j_t *f1 = (H5FD_sec2j_t*) _f1;
+
+    sec2j_debug("H5FD_sec2j_write()\n");
 
     if (f1->trans) {
         if (H5FD_sec2j_log_entry(f1, addr, size) < 0) return -10;
@@ -437,5 +450,8 @@ static herr_t H5FD_sec2j_write(H5FD_t *_f1, H5FD_mem_t type, hid_t fapl_id, hadd
 
 static herr_t H5FD_sec2j_truncate(H5FD_t *_f1, hid_t dxpl_id, hbool_t closing) {
     H5FD_sec2j_t *f1 = (H5FD_sec2j_t*) _f1;
+
+    sec2j_debug("H5FD_sec2j_truncate()\n");
+
     return H5FDtruncate(f1->data, dxpl_id, closing);
 }
