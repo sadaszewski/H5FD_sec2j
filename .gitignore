@@ -31,3 +31,6 @@
 *.pro.user
 Makefile
 sec2j.c
+*.png
+*.h5
+*.h5.journal

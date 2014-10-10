@@ -24,7 +24,7 @@ def main():
 	f = h5py.File(fid)
 	sec2j.tx_start(fid.id)
 	g = f.require_group('bbic/volume/0')
-	for i in range(100):
+	for i in range(10000):
 		g.attrs.create('a%d' % i, 640)
 	f.flush()
 	os._exit(-1)
