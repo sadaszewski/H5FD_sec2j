@@ -15,6 +15,7 @@
 #include <H5Ipublic.h>
 #include <H5FDsec2.h>
 #include <H5FDpublic.h>
+#include <H5Epublic.h>
 
 #include <zlib.h>
 
@@ -28,7 +29,7 @@
 
 static hid_t H5FD_SEC2j_g = 0;
 static hid_t H5FD_SEC2J_fapl = 0;
-static H5FD_t *H5FD_SEC2J_dummy = 0;
+static const H5FD_class_t *sec2_cls = 0;
 
 static H5FD_t *H5FD_sec2j_open(const char *name, unsigned flags, hid_t fapl_id,
             haddr_t maxaddr);
@@ -89,6 +90,7 @@ typedef struct H5FD_sec2j_t {
     hsize_t last_entry;
     haddr_t eoa;
     int trans;
+    char journal_name[256];
 } H5FD_sec2j_t;
 
 static int H5FD_sec2j_journal_init(H5FD_sec2j_t *f1);
@@ -108,9 +110,17 @@ hid_t H5FD_sec2j_init() {
 
         sec2j_debug("H5FD_SEC2J_fapl created\n");
 
-        H5FD_SEC2J_dummy = H5FDopen("sec2j_dummy.h5", H5F_ACC_CREAT | H5F_ACC_RDWR, H5P_DEFAULT, MAXADDR);
+        H5FD_t *f = H5FDopen("sec2j_dummy.h5", H5F_ACC_CREAT | H5F_ACC_RDWR, H5P_DEFAULT, MAXADDR);
 
-        sec2j_debug("H5FD_SEC2J_dummy created: 0x%lX\n", (u_int64_t) H5FD_SEC2J_dummy);
+        if (!f) {
+            return -1;
+        }
+
+        sec2j_debug("H5FD_SEC2J_dummy created: 0x%lX\n", (u_int64_t) f);
+
+        sec2_cls = f->cls;
+
+        H5FDclose(f);
 
         H5FD_SEC2j_g = H5FDregister(&H5FD_sec2j_g);
 
@@ -125,7 +135,13 @@ hid_t H5FD_sec2j_init() {
 }
 
 void H5FD_sec2j_term() {
-    H5FD_SEC2j_g = 0;
+    if (H5FD_SEC2j_g) {
+        H5Pclose(H5FD_SEC2J_fapl);
+
+        H5FDunregister(H5FD_SEC2j_g);
+
+        H5FD_SEC2j_g = 0;
+    }
 }
 
 herr_t H5Pset_fapl_sec2j(hid_t fapl_id) {
@@ -139,6 +155,12 @@ herr_t H5FD_sec2j_start_transaction(H5FD_t *_f1) {
     if (f1->trans) return -10; // transaction already in progress
 
     sec2j_debug("Starting transaction...\n");
+
+    f1->eoa = H5FDget_eoa(f1->data, H5FD_MEM_DEFAULT);
+
+    ftruncate(f1->data_fd, H5FDget_eof(f1->data));
+
+    sec2j_debug("eoa: 0x%lX\n", f1->eoa);
 
     f1->trans = 1;
 
@@ -200,11 +222,15 @@ static int H5FD_sec2j_log_entry(H5FD_sec2j_t *f1, haddr_t addr, hsize_t size) {
     hsize_t n, k;
     hssize_t old_pos;
 
-    sec2j_debug("H5FD_sec2j_log_entry()\n");
+    sec2j_debug("H5FD_sec2j_log_entry(), addr: 0x%lX, size: %llu\n", addr, size);
 
     if (f1->trans == 0) return -1; // not in transaction mode
 
     if (addr >= f1->eoa) return 0; // past the sync point EOA, not interesting, good optimization
+
+    if (f1->eoa - addr < size) size = f1->eoa - addr; // don't care after saved eao
+
+    sec2j_debug("corrected size: %llu\n", size);
 
     old_pos = lseek64(f1->data_fd, 0, 1);
     if (old_pos == -1) return -5;
@@ -218,7 +244,16 @@ static int H5FD_sec2j_log_entry(H5FD_sec2j_t *f1, haddr_t addr, hsize_t size) {
         k -= n;
     }
 
+    if (k != 0) {
+        sec2j_debug("k: %llu\n", k);
+        return -8; // not all data could be read
+    }
+
+    sec2j_debug("crc: 0x%08X\n", crc);
+
     new_entry = lseek64(f1->journal_fd, 0, 2);
+
+    sec2j_debug("new_entry: %lld\n", new_entry);
 
     if (write(f1->journal_fd, &addr, sizeof(hsize_t)) != sizeof(hsize_t)) return -10; // write address
 
@@ -226,13 +261,28 @@ static int H5FD_sec2j_log_entry(H5FD_sec2j_t *f1, haddr_t addr, hsize_t size) {
 
     if (write(f1->journal_fd, &crc, sizeof(u_int32_t)) != sizeof(u_int32_t)) return -30; // write checksum
 
+    if (lseek64(f1->data_fd, addr, 0) == -1) return -35; // couldn't seek again to correct data pos
+
     k = size; // write data
     while (k > 0 && (n = read(f1->data_fd, buf, k < sizeof(buf) ? k : sizeof(buf))) > 0) {
         if (write(f1->journal_fd, buf, n) != (hssize_t) n) return -40;
+
+        hsize_t i;
+        for (i = 0; i < n; i++) {
+            sec2j_debug("%d ", buf[i]);
+        }
+        sec2j_debug("\n\n");
+
         k -= n;
     }
 
+    if (k != 0) return -45; // not all data could be written
+
     if (write(f1->journal_fd, &f1->last_entry, sizeof(hsize_t)) != sizeof(hsize_t)) return -50; // previous entry
+
+    if (lseek64(f1->journal_fd, 5, 0) == -1) return -55; // back to last entry offset
+
+    if (write(f1->journal_fd, &new_entry, sizeof(hsize_t)) != sizeof(hsize_t)) return -57; // write last entry ofs
 
     if (fsync(f1->journal_fd) == -1) return -60; // sync journal
 
@@ -256,9 +306,14 @@ static int H5FD_sec2j_revert_changes(int data_fd, int journal_fd) {
 
     if (read(journal_fd, buf, 5) != 5) return -15; // read magic string
     buf[6] = 0;
-    if (strcmp(buf, "sec2j") != 0) return -17; // bad magic
+    if (strcmp(buf, "sec2j") != 0) {
+        sec2j_debug("Bad magic string in journal: %s\n", buf);
+        return -17; // bad magic
+    }
 
     if (read(journal_fd, &ofs, sizeof(hsize_t)) != sizeof(hsize_t)) return -20; // read position of last entry
+
+    sec2j_debug("last_entry: %llu\n", ofs);
 
     while (ofs > 0) { // traverse log backwards
         if (lseek64(journal_fd, ofs, 0) == -1) return -30;
@@ -274,11 +329,19 @@ static int H5FD_sec2j_revert_changes(int data_fd, int journal_fd) {
         crc = crc32(0, 0, 0); // validate checksum
         k = size;
         while (k > 0 && (n = read(journal_fd, buf, k < sizeof(buf) ? k : sizeof(buf))) > 0) {
+            hsize_t i;
+            for (i = 0; i < n; i++) {
+                sec2j_debug("%d ", buf[i]);
+            }
+            sec2j_debug("\n");
             crc = crc32(crc, (unsigned char*) buf, n);
             k -= n;
         }
 
+        sec2j_debug("Writing %lld bytes at 0x%llX, saved_crc: 0x%08X\n", size, addr_ofs, saved_crc);
+
         if (k != 0 || crc != saved_crc) {
+            sec2j_debug("Bad crc: 0x%08X\n", crc);
             return -67; // bad crc
         }
 
@@ -302,10 +365,15 @@ static int H5FD_sec2j_revert_changes(int data_fd, int journal_fd) {
 static H5FD_t *H5FD_sec2j_open(const char *name, unsigned flags, hid_t fapl_id, haddr_t maxaddr)
 {
     H5FD_sec2j_t *file = 0;
-    char *buf = 0;
     int ret;
+    hid_t sec2_fapl = -1;
 
-    sec2j_debug("H5FD_sec2j_open(), name: %s, maxaddr: 0x%lX, flags: 0x%lX\n", name, maxaddr, flags);
+    sec2j_debug("H5FD_sec2j_open(), name: %s, maxaddr: 0x%lX, flags: 0x%lX\n", name, maxaddr, (u_int64_t) flags);
+
+    if (strlen(name) > 247) {
+        sec2j_debug("SEC2J filename too long\n");
+        goto fail;
+    }
 
     if ((flags & H5F_ACC_RDWR) == 0) {
         sec2j_debug("Read-only access to journalled file is impossible. Journal cannot be played back.\n");
@@ -316,25 +384,30 @@ static H5FD_t *H5FD_sec2j_open(const char *name, unsigned flags, hid_t fapl_id, 
 
     file->journal_fd = -1;
 
-    if (H5Pset_fapl_sec2(fapl_id) < 0) goto fail;
-    if ((file->data = H5FDopen(name, flags, fapl_id, maxaddr)) == 0) goto fail;
+    if ((sec2_fapl = H5Pcopy(fapl_id)) < 0) goto fail;
+    if (H5Pset_fapl_sec2(sec2_fapl) < 0) goto fail;
+
+    if ((file->data = H5FDopen(name, flags, sec2_fapl, maxaddr)) == 0) {
+        sec2j_debug("H5FDopen() failed\n");
+        //H5Eprint(H5E_DEFAULT, stderr);
+        //H5Eclear(H5E_DEFAULT);
+        goto fail;
+    }
 
     sec2j_debug("file->data: 0x%lX, file->data->driver_id: %d, H5FD_SEC2: %d\n", (u_int64_t) file->data, file->data->driver_id, H5FD_SEC2);
 
     void *fd;
     if (H5FDget_vfd_handle(file->data, H5P_DEFAULT, &fd) < 0) goto fail;
 
-    sec2j_debug("fd: %ld\n", *((int*) fd));
+    sec2j_debug("fd: %d\n", *((int*) fd));
 
     file->data_fd = *((int*) fd);
 
     sec2j_debug("Made it here...\n");
 
-    buf = (char*) malloc(strlen(name) + 16);
-    if (buf == 0) goto fail;
-    sprintf(buf, "%s.journal", name);
+    sprintf(file->journal_name, "%s.journal", name);
 
-    if ((file->journal_fd = open(buf, O_RDONLY)) == -1) {
+    if ((file->journal_fd = open(file->journal_name, O_RDONLY)) == -1) {
         sec2j_debug("No journal that's good\n");
     } else {
         sec2j_debug("Journal found. Reverting changes...\n");
@@ -344,10 +417,10 @@ static H5FD_t *H5FD_sec2j_open(const char *name, unsigned flags, hid_t fapl_id, 
         }
         sec2j_debug("Done. Removing journal...\n");
         if (close(file->journal_fd) == -1) goto fail;
-        if (unlink(buf) == -1) goto fail;
+        if (unlink(file->journal_name) == -1) goto fail;
     }
 
-    if ((file->journal_fd = open(buf, O_WRONLY | O_CREAT, 0600)) == -1) goto fail;
+    if ((file->journal_fd = open(file->journal_name, O_WRONLY | O_CREAT, 0600)) == -1) goto fail;
 
     H5FD_sec2j_journal_init(file);
 
@@ -357,16 +430,18 @@ static H5FD_t *H5FD_sec2j_open(const char *name, unsigned flags, hid_t fapl_id, 
 
 fail:
     sec2j_debug("H5FD_sec2j_open() failed\n");
+    if (sec2_fapl >= 0) H5Pclose(sec2_fapl);
     if (file->journal_fd != -1) close(file->journal_fd);
     if (file->data) H5FDclose(file->data);
     if (file) free(file);
-    if (buf) free(buf);
 
+    sec2j_debug("Returning 0\n");
     return 0;
 }
 
 static herr_t H5FD_sec2j_close(H5FD_t *_file) {
     H5FD_sec2j_t *file;
+    herr_t ret;
 
     sec2j_debug("H5FD_sec2j_close()\n");
 
@@ -377,7 +452,18 @@ static herr_t H5FD_sec2j_close(H5FD_t *_file) {
         if (H5FD_sec2j_end_transaction(_file) < 0) return -10;
     }
 
-    return H5FDclose(file->data);
+    fsync(file->data_fd);
+
+    if ((ret = H5FDclose(file->data)) >= 0) {
+        sec2j_debug("Everything seems in order. Removing journal...\n");
+        /* if (unlink(file->journal_name) == -1) {
+            return -20;
+        } */
+    }
+
+    free(file);
+
+    return ret;
 }
 
 static int H5FD_sec2j_cmp(const H5FD_t *_f1, const H5FD_t *_f2) {
@@ -390,7 +476,7 @@ static int H5FD_sec2j_cmp(const H5FD_t *_f1, const H5FD_t *_f2) {
 static herr_t H5FD_sec2j_query(const H5FD_t *_f1, unsigned long *flags) {
     H5FD_sec2j_t *f1 = (H5FD_sec2j_t*) _f1;
     sec2j_debug("H5FD_sec2j_query(), _f1: 0x%lX\n", (u_int64_t) _f1);
-    herr_t ret = H5FD_SEC2J_dummy->cls->query(f1 ? f1->data : 0, flags);
+    herr_t ret = sec2_cls->query(f1 ? f1->data : 0, flags);
     sec2j_debug("Ok\n");
     return ret;
 }
@@ -442,7 +528,11 @@ static herr_t H5FD_sec2j_write(H5FD_t *_f1, H5FD_mem_t type, hid_t fapl_id, hadd
     sec2j_debug("H5FD_sec2j_write()\n");
 
     if (f1->trans) {
-        if (H5FD_sec2j_log_entry(f1, addr, size) < 0) return -10;
+        herr_t ret;
+        if ((ret = H5FD_sec2j_log_entry(f1, addr, size)) < 0) {
+            sec2j_debug("H5FD_sec2j_log_entry() failed: %d\n", ret);
+            return -10;
+        }
     }
 
     return H5FDwrite(f1->data, type, fapl_id, addr, size, buf);
