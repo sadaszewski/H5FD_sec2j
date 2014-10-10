@@ -14,18 +14,21 @@ def main():
 	print 'fapl.id:', fapl.id
 	sec2j.set_fapl(fapl.id)
 	fname = "test.h5"
-	fid = h5f.create(fname, flags=h5f.ACC_TRUNC, fapl=fapl)
+	if os.path.exists(fname):
+		print 'Opening the file...'
+		fid = h5f.open(fname, fapl=fapl)
+	else:
+		fid = h5f.create(fname, flags=h5f.ACC_TRUNC, fapl=fapl)
 	print 'fid ready:', fid.id
-	return
+	#return
 	f = h5py.File(fid)
 	sec2j.tx_start(fid.id)
 	g = f.require_group('bbic/volume/0')
-	g.attrs.create('width', 640)
+	for i in range(100):
+		g.attrs.create('a%d' % i, 640)
 	f.flush()
 	os._exit(-1)
 	#print f
-
-
 
 if __name__ == '__main__':
     main()

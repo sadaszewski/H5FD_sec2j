@@ -156,9 +156,13 @@ herr_t H5FD_sec2j_start_transaction(H5FD_t *_f1) {
 
     sec2j_debug("Starting transaction...\n");
 
+    if (H5FDflush(f1->data, H5P_DATASET_XFER_DEFAULT, 0) < 0) return -15;
+
     f1->eoa = H5FDget_eoa(f1->data, H5FD_MEM_DEFAULT);
 
-    ftruncate(f1->data_fd, H5FDget_eof(f1->data));
+    if (ftruncate(f1->data_fd, H5FDget_eof(f1->data)) == -1) return -20;
+
+    if (fsync(f1->data_fd) == -1) return -30;
 
     sec2j_debug("eoa: 0x%lX\n", f1->eoa);
 
@@ -191,6 +195,8 @@ herr_t H5FD_sec2j_end_transaction(H5FD_t *_f1) {
 
 herr_t H5FD_sec2j_tx_start(hid_t __f1) {
     H5FD_t *_f1;
+
+    H5Fflush(__f1, H5F_SCOPE_GLOBAL);
 
     if (H5Fget_vfd_handle(__f1, H5FD_SEC2J_fapl, (void**) &_f1) < 0) return -10;
 
@@ -345,7 +351,7 @@ static int H5FD_sec2j_revert_changes(int data_fd, int journal_fd) {
             return -67; // bad crc
         }
 
-        if (lseek64(journal_fd, ofs, 0) == -1) return -68; // seek back journal
+        if (lseek64(journal_fd, ofs + sizeof(hsize_t) * 2 + sizeof(u_int32_t), 0) == -1) return -68; // seek back journal
 
         k = size; // write to data file
         while (k > 0 && (n = read(journal_fd, buf, k < sizeof(buf) ? k : sizeof(buf))) > 0) {
@@ -384,6 +390,34 @@ static H5FD_t *H5FD_sec2j_open(const char *name, unsigned flags, hid_t fapl_id, 
 
     file->journal_fd = -1;
 
+    sprintf(file->journal_name, "%s.journal", name);
+
+    if ((file->journal_fd = open(file->journal_name, O_RDONLY)) == -1) {
+        sec2j_debug("No journal that's good\n");
+    } else {
+        sec2j_debug("Journal found. Reverting changes...\n");
+
+        if ((file->data_fd = open(name, O_RDWR)) == -1) {
+            sec2j_debug("Unable to open the data file\n");
+            goto fail;
+        }
+
+        ret = H5FD_sec2j_revert_changes(file->data_fd, file->journal_fd);
+
+        if (close(file->data_fd) == -1) {
+            sec2j_debug("Unable to close the data file\n");
+            goto fail;
+        }
+
+        if (ret < 0) {
+            sec2j_debug("Failed to revert changes: %d\n", ret);
+            goto fail;
+        }
+        sec2j_debug("Done. Removing journal...\n");
+        if (close(file->journal_fd) == -1) goto fail;
+        if (unlink(file->journal_name) == -1) goto fail;
+    }
+
     if ((sec2_fapl = H5Pcopy(fapl_id)) < 0) goto fail;
     if (H5Pset_fapl_sec2(sec2_fapl) < 0) goto fail;
 
@@ -404,21 +438,6 @@ static H5FD_t *H5FD_sec2j_open(const char *name, unsigned flags, hid_t fapl_id, 
     file->data_fd = *((int*) fd);
 
     sec2j_debug("Made it here...\n");
-
-    sprintf(file->journal_name, "%s.journal", name);
-
-    if ((file->journal_fd = open(file->journal_name, O_RDONLY)) == -1) {
-        sec2j_debug("No journal that's good\n");
-    } else {
-        sec2j_debug("Journal found. Reverting changes...\n");
-        if ((ret = H5FD_sec2j_revert_changes(file->data_fd, file->journal_fd)) < 0) {
-            sec2j_debug("Failed to revert changes: %d\n", ret);
-            goto fail;
-        }
-        sec2j_debug("Done. Removing journal...\n");
-        if (close(file->journal_fd) == -1) goto fail;
-        if (unlink(file->journal_name) == -1) goto fail;
-    }
 
     if ((file->journal_fd = open(file->journal_name, O_WRONLY | O_CREAT, 0600)) == -1) goto fail;
 
@@ -456,9 +475,9 @@ static herr_t H5FD_sec2j_close(H5FD_t *_file) {
 
     if ((ret = H5FDclose(file->data)) >= 0) {
         sec2j_debug("Everything seems in order. Removing journal...\n");
-        /* if (unlink(file->journal_name) == -1) {
+        if (unlink(file->journal_name) == -1) {
             return -20;
-        } */
+        }
     }
 
     free(file);
