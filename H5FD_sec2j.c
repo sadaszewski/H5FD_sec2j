@@ -30,6 +30,7 @@
 static hid_t H5FD_SEC2j_g = 0;
 static hid_t H5FD_SEC2J_fapl = 0;
 static const H5FD_class_t *sec2_cls = 0;
+static int H5FD_SEC2J_exit = 0;
 
 static H5FD_t *H5FD_sec2j_open(const char *name, unsigned flags, hid_t fapl_id,
             haddr_t maxaddr);
@@ -211,6 +212,10 @@ herr_t H5FD_sec2j_tx_end(hid_t __f1) {
     return H5FD_sec2j_end_transaction(_f1);
 }
 
+void H5FD_sec2j_set_exit(int n) {
+    H5FD_SEC2J_exit = n;
+}
+
 static int H5FD_sec2j_journal_init(H5FD_sec2j_t *f1) {
     if (write(f1->journal_fd, "sec2j", 5) != 5) return -10;
 
@@ -311,7 +316,7 @@ static int H5FD_sec2j_revert_changes(int data_fd, int journal_fd) {
     if (lseek64(journal_fd, 0, 0) == -1) return -10; // set position to 0
 
     if (read(journal_fd, buf, 5) != 5) return -15; // read magic string
-    buf[6] = 0;
+    buf[5] = 0;
     if (strcmp(buf, "sec2j") != 0) {
         sec2j_debug("Bad magic string in journal: %s\n", buf);
         return -17; // bad magic
@@ -502,19 +507,19 @@ static herr_t H5FD_sec2j_query(const H5FD_t *_f1, unsigned long *flags) {
 
 static haddr_t H5FD_sec2j_get_eoa(const H5FD_t *_f1, H5FD_mem_t type) {
     H5FD_sec2j_t *f1 = (H5FD_sec2j_t*) _f1;
-    sec2j_debug("H5FD_sec2j_get_eoa()\n");
+    // sec2j_debug("H5FD_sec2j_get_eoa()\n");
     return H5FDget_eoa(f1->data, type);
 }
 
 static herr_t H5FD_sec2j_set_eoa(H5FD_t *_f1, H5FD_mem_t type, haddr_t addr) {
     H5FD_sec2j_t *f1 = (H5FD_sec2j_t*) _f1;
-    sec2j_debug("H5FD_sec2j_set_eoa()\n");
+    // sec2j_debug("H5FD_sec2j_set_eoa()\n");
     return H5FDset_eoa(f1->data, type, addr);
 }
 
 static haddr_t H5FD_sec2j_get_eof(const H5FD_t *_f1) {
     H5FD_sec2j_t *f1 = (H5FD_sec2j_t*) _f1;
-    sec2j_debug("H5FD_sec2j_get_eof()\n");
+    // sec2j_debug("H5FD_sec2j_get_eof()\n");
     return H5FDget_eof(f1->data);
 }
 
@@ -544,7 +549,7 @@ static herr_t H5FD_sec2j_write(H5FD_t *_f1, H5FD_mem_t type, hid_t fapl_id, hadd
 {
     H5FD_sec2j_t *f1 = (H5FD_sec2j_t*) _f1;
 
-    sec2j_debug("H5FD_sec2j_write()\n");
+    // sec2j_debug("H5FD_sec2j_write(), type: %d\n", type);
 
     if (f1->trans) {
         herr_t ret;
@@ -552,6 +557,10 @@ static herr_t H5FD_sec2j_write(H5FD_t *_f1, H5FD_mem_t type, hid_t fapl_id, hadd
             sec2j_debug("H5FD_sec2j_log_entry() failed: %d\n", ret);
             return -10;
         }
+    }
+
+    if (H5FD_SEC2J_exit && rand() % 11 == 1) {
+        _exit(H5FD_SEC2J_exit);
     }
 
     return H5FDwrite(f1->data, type, fapl_id, addr, size, buf);

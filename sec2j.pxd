@@ -9,3 +9,5 @@ cdef extern from "H5FD_sec2j.h":
 
     herr_t H5FD_sec2j_tx_start(hid_t __f1)
     herr_t H5FD_sec2j_tx_end(hid_t __f1)
+
+    void H5FD_sec2j_set_exit(int n)
